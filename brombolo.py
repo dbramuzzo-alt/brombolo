@@ -1,141 +1,104 @@
 import streamlit as st
 import billboard
 import pandas as pd
-from github import Github
+from github import Github, Auth  # Aggiunto Auth qui
 import io
 import datetime
 
 # --- 1. CONFIGURAZIONE E CONNESSIONE ---
-# Recupero i segreti impostati su Streamlit Cloud
 try:
     TOKEN = st.secrets["GITHUB_TOKEN"]
     REPO_NAME = st.secrets["REPO_NAME"]
     FILE_PATH = "archivio_billboard.csv"
 except Exception as e:
-    st.error("❌ ERRORE: Configura GITHUB_TOKEN e REPO_NAME nei Secrets di Streamlit.")
+    st.error("❌ Configura GITHUB_TOKEN e REPO_NAME nei Secrets.")
     st.stop()
 
-# Inizializzazione GitHub
-g = Github(TOKEN)
+# NUOVO METODO DI AUTENTICAZIONE (Risolve il tuo errore)
+auth = Auth.Token(TOKEN)
+g = Github(auth=auth)
 
 def carica_archivio():
-    """Scarica il database da GitHub o ne crea uno vuoto se non esiste"""
     try:
-        repo = g.get_repo(REPO_NAME)
-        file_content = repo.get_contents(FILE_PATH)
-        df = pd.read_csv(io.StringIO(file_content.decoded_content.decode()))
-        return df, file_content.sha
-    except Exception:
-        # Se il file non esiste, restituiamo un DataFrame vuoto e sha None
-        return pd.DataFrame(columns=["Data", "Tag", "Pos", "Canzone", "Artista"]), None
+        # Usiamo get_repo in modo esplicito
+        repo = g.get_repo(REPO_NAME.strip())
+        try:
+            file_content = repo.get_contents(FILE_PATH)
+            df = pd.read_csv(io.StringIO(file_content.decoded_content.decode()))
+            return df, file_content.sha
+        except:
+            # Se il file non esiste ancora nel repo
+            return pd.DataFrame(columns=["Data", "Tag", "Pos", "Canzone", "Artista"]), None
+    except Exception as e:
+        st.error(f"Errore connessione Repo: {e}")
+        return pd.DataFrame(), None
 
 def salva_su_github(df_nuovo, sha):
-    """Salva il file aggiornato su GitHub"""
-    repo = g.get_repo(REPO_NAME)
+    repo = g.get_repo(REPO_NAME.strip())
     csv_content = df_nuovo.to_csv(index=False)
     if sha:
-        repo.update_file(FILE_PATH, "Update Billboard Data", csv_content, sha)
+        repo.update_file(FILE_PATH, "Update Billboard", csv_content, sha)
     else:
-        repo.create_file(FILE_PATH, "Create Billboard Data", csv_content)
+        repo.create_file(FILE_PATH, "Create Billboard", csv_content)
 
-def correggi_data_billboard(data_input):
-    """Trova il sabato corretto per Billboard"""
-    giorno_settimana = data_input.weekday() # 5 è Sabato
-    if giorno_settimana == 5:
-        return data_input
-    else:
-        giorni_da_togliere = (giorno_settimana + 2) % 7
-        return data_input - datetime.timedelta(days=giorni_da_togliere)
+def correggi_data(data_in):
+    giorno = data_in.weekday()
+    return data_in if giorno == 5 else data_in - datetime.timedelta(days=(giorno + 2) % 7)
 
-# --- 2. INTERFACCIA APP ---
-st.set_page_config(page_title="Billboard Full Archiver", page_icon="🎵", layout="wide")
-st.title("🎵 Billboard Hot 100: Database Personale")
+# --- 2. INTERFACCIA ---
+st.set_page_config(page_title="Billboard Full Archiver", layout="wide")
+st.title("🎵 Billboard Hot 100 Archiver")
 
-# Caricamento dati
 df_storico, file_sha = carica_archivio()
 
-# Sidebar
-st.sidebar.header("📥 Gestione Dati")
-data_scelta = st.sidebar.date_input("Scegli una data", value=datetime.date.today())
+st.sidebar.header("📥 Download")
+data_scelta = st.sidebar.date_input("Data (Sabato)", value=datetime.date.today())
 
 if st.sidebar.button("Scarica Tutte le 100"):
-    data_billboard = correggi_data_billboard(data_scelta)
-    
-    with st.spinner(f"Scaricando i 100 brani del {data_billboard}..."):
+    data_ok = correggi_data(data_scelta)
+    with st.spinner("Scaricamento in corso..."):
         try:
-            chart = billboard.ChartData('hot-100', date=str(data_billboard))
-            
-            if not chart:
-                st.sidebar.error("❌ Nessun dato trovato per questa data.")
-            else:
-                nuove_righe = []
-                
-                # Creiamo il set di canzoni GIA' SALVATE per il controllo NEW
-                canzoni_gia_salvate = set()
+            chart = billboard.ChartData('hot-100', date=str(data_ok))
+            if chart:
+                # Logica controllo brani già salvati
+                gia_visti = set()
                 if not df_storico.empty:
-                    canzoni_gia_salvate = set(
-                        (df_storico['Canzone'].str.lower() + " - " + df_storico['Artista'].str.lower()).unique()
-                    )
+                    gia_visti = set((df_storico['Canzone'].str.lower() + " - " + df_storico['Artista'].str.lower()).unique())
 
+                nuove_righe = []
                 for e in chart:
                     chiave = f"{e.title} - {e.artist}".lower().strip()
-                    # Mette NEW solo se non l'abbiamo MAI vista nel CSV
-                    is_new = chiave not in canzoni_gia_salvate
-                    
                     nuove_righe.append({
                         "Data": str(chart.date),
-                        "Tag": "NEW✨" if is_new else "",
+                        "Tag": "NEW✨" if chiave not in gia_visti else "",
                         "Pos": e.rank,
                         "Canzone": e.title,
                         "Artista": e.artist
                     })
                 
-                # Uniamo i nuovi dati allo storico
                 df_finale = pd.concat([df_storico, pd.DataFrame(nuove_righe)], ignore_index=True)
-                
-                # Salvataggio
                 salva_su_github(df_finale, file_sha)
-                
-                st.sidebar.success(f"✅ Salvato con successo!")
+                st.sidebar.success("✅ Salvato!")
                 st.rerun()
-
         except Exception as e:
-            st.sidebar.error(f"❌ Errore durante il salvataggio: {e}")
+            st.sidebar.error(f"Errore: {e}")
 
-# --- 3. VISUALIZZAZIONE ---
-if not df_storico.empty:
-    st.subheader(f"📊 Archivio ({len(df_storico)} voci)")
+# --- 3. TABELLA ---
+if df_storico is not None and not df_storico.empty:
+    st.subheader(f"📊 Archivio ({len(df_storico)} righe)")
     
     df_vista = df_storico.copy()
     df_vista['Data'] = pd.to_datetime(df_vista['Data'])
     
-    # Filtro NEW
-    solo_new = st.checkbox("Mostra solo i brani 'NEW✨'")
+    solo_new = st.checkbox("Mostra solo 'NEW✨'")
     if solo_new:
         df_vista = df_vista[df_vista['Tag'] == "NEW✨"]
     
-    # Ordiniamo: Ultima data inserita in alto, posizione dalla 1 alla 100
-    df_vista = df_vista.sort_values(by=["Data", "Pos"], ascending=[False, True])
-
     st.dataframe(
-        df_vista, 
-        use_container_width=True, 
-        hide_index=True,
-        column_config={
-            "Data": st.column_config.DateColumn("Data Classifica"),
-            "Pos": st.column_config.NumberColumn("Rank", format="#%d"),
-            "Tag": "Novità",
-            "Canzone": "Titolo",
-            "Artista": "Artista"
-        }
-    )
-    
-    st.download_button(
-        "📥 Esporta CSV", 
-        df_storico.to_csv(index=False).encode('utf-8'), 
-        "archivio_billboard.csv", 
-        "text/csv"
+        df_vista.sort_values(by=["Data", "Pos"], ascending=[False, True]),
+        use_container_width=True,
+        hide_index=True
     )
 else:
-    st.info("💡 L'archivio è vuoto. Scarica la tua prima classifica dalla barra laterale!")
+    st.info("L'archivio è vuoto. Scarica una classifica!")
     
