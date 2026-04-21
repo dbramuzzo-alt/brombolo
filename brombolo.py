@@ -1,39 +1,70 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import billboard
 import pandas as pd
+from github import Github
+import io
+import base64
 
-st.set_page_config(page_title="Billboard Archive", page_icon="🎵")
+# --- CONFIGURAZIONE ---
+TOKEN = st.secrets["GITHUB_TOKEN"]
+REPO_NAME = st.secrets["REPO_NAME"]
+FILE_PATH = "archivio_billboard.csv"
 
-# --- CONNESSIONE A GOOGLE SHEETS ---
-conn = st.connection("gsheets", type=GSheetsConnection)
+# Inizializzazione GitHub
+g = Github(TOKEN)
+repo = g.get_repo(REPO_NAME)
 
-st.title("🎵 Billboard Archiver (Google Sheets)")
+def carica_archivio():
+    try:
+        file_content = repo.get_contents(FILE_PATH)
+        df = pd.read_csv(io.StringIO(file_content.decoded_content.decode()))
+        return df, file_content.sha
+    except:
+        return pd.DataFrame(columns=["Data", "Pos", "Canzone", "Artista", "Tag"]), None
 
-# Carichiamo i dati esistenti
-try:
-    df_esistente = conn.read(ttl=0) # ttl=0 forza l'aggiornamento dei dati
-except:
-    df_esistente = pd.DataFrame(columns=["Data", "Canzone", "Artista"])
+def salva_su_github(df_nuovo, sha):
+    csv_content = df_nuovo.to_csv(index=False)
+    if sha:
+        repo.update_file(FILE_PATH, "Update Billboard Archive", csv_content, sha)
+    else:
+        repo.create_file(FILE_PATH, "Create Billboard Archive", csv_content)
 
-# --- SIDEBAR PER SCARICARE ---
-st.sidebar.header("Nuova Ricerca")
-data_input = st.sidebar.date_input("Scegli un Sabato")
+# --- APP INTERFACCIA ---
+st.title("🎵 Billboard GitHub Archiver")
 
-if st.sidebar.button("Scarica e Salva su Sheets"):
-    with st.spinner("Connessione a Billboard..."):
-        try:
-            chart = billboard.ChartData('hot-100', date=str(data_input))
-            
-            # Creiamo una lista di nuove righe (Top 10)
-            nuovi_dati = []
+df_storico, file_sha = carica_archivio()
+
+# Sidebar
+data_scelta = st.sidebar.date_input("Seleziona un Sabato")
+
+if st.sidebar.button("Scarica e Archivia"):
+    with st.spinner("Recupero dati..."):
+        chart = billboard.ChartData('hot-100', date=str(data_scelta))
+        if chart:
+            nuove_righe = []
             for e in chart[:10]:
-                nuovi_dati.append({
+                # Logica unicità
+                chiave = f"{e.title} - {e.artist}".lower().strip()
+                gia_presente = chiave in df_storico['Canzone'].str.lower().str.cat(df_storico['Artista'].str.lower(), sep=' - ').values
+                
+                nuove_righe.append({
                     "Data": str(chart.date),
+                    "Pos": e.rank,
                     "Canzone": e.title,
-                    "Artista": e.artist
+                    "Artista": e.artist,
+                    "Tag": "NEW✨" if not gia_presente else ""
                 })
             
+            df_nuovo = pd.concat([df_storico, pd.DataFrame(nuove_righe)], ignore_index=True)
+            salva_su_github(df_nuovo, file_sha)
+            st.success(f"Classifica del {chart.date} salvata!")
+            st.rerun()
+
+# Visualizzazione
+if not df_storico.empty:
+    st.write("### Archivio Storico")
+    # Mostra le ultime aggiunte in alto
+    st.dataframe(df_storico.sort_index(ascending=False), use_container_width=True)
             df_nuovo = pd.DataFrame(nuovi_dati)
             
             # Uniamo i nuovi dati ai vecchi
