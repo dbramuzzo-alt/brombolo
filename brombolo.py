@@ -23,7 +23,7 @@ def carica_archivio():
         df = pd.read_csv(io.StringIO(file_content.decoded_content.decode()))
         return df, file_content.sha
     except:
-        return pd.DataFrame(columns=["Data", "Tag", "Pos", "Canzone", "Artista", "Dettaglio"]), None
+        return pd.DataFrame(columns=["Data", "Tag", "Pos", "Canzone", "Artista"]), None
 
 def salva_su_github(df_nuovo, sha):
     csv_content = df_nuovo.to_csv(index=False)
@@ -41,81 +41,48 @@ def correggi_data_billboard(data_input):
         return data_input - datetime.timedelta(days=giorni_da_togliere)
 
 # --- INTERFACCIA ---
-st.set_page_config(page_title="Billboard Archiver Pro", page_icon="🚀", layout="wide")
-st.title("🎵 Billboard Pro Archiver")
+st.set_page_config(page_title="Billboard Full Archiver", page_icon="🎵", layout="wide")
+st.title("🎵 Billboard Hot 100: Full Archiver")
 
 df_storico, file_sha = carica_archivio()
 
-st.sidebar.header("➕ Nuova Classifica")
-data_scelta = st.sidebar.date_input("Seleziona una data", value=datetime.date.today())
+st.sidebar.header("📥 Scarica Classifica")
+data_scelta = st.sidebar.date_input("Data (Sabato)", value=datetime.date.today())
 
-if st.sidebar.button("Scarica e Archivia"):
+if st.sidebar.button("Scarica Tutte le 100"):
     data_ottimizzata = correggi_data_billboard(data_scelta)
-    with st.spinner(f"Recupero dati per il {data_ottimizzata}..."):
+    with st.spinner(f"Scarico 100 brani per il {data_ottimizzata}..."):
         try:
             chart = billboard.ChartData('hot-100', date=str(data_ottimizzata))
             
             if not chart:
-                st.sidebar.error("Nessun dato trovato.")
+                st.sidebar.error("Dati non disponibili.")
             else:
                 nuove_righe = []
                 
-                # --- LOGICA NEW: Recuperiamo i titoli già presenti nel file CSV ---
-                # Prendiamo solo i titoli dell'ultimo aggiornamento per il confronto
-                titoli_gia_in_archivio = set()
+                # Creiamo un set di canzoni già viste per velocità
+                canzoni_gia_viste = set()
                 if not df_storico.empty:
-                    # Creiamo un set di "Titolo - Artista" di tutto quello che è già salvato nel CSV
-                    # per marcare come NEW tutto ciò che entra per la prima volta nel database
-                    titoli_gia_in_archivio = set((df_storico['Canzone'].str.lower() + " - " + df_storico['Artista'].str.lower()).unique())
+                    canzoni_gia_viste = set((df_storico['Canzone'].str.lower() + " - " + df_storico['Artista'].str.lower()).unique())
 
-                # Funzione interna per marcare NEW
-                def check_new(entry):
-                    chiave = f"{entry.title} - {entry.artist}".lower().strip()
-                    return "NEW✨ " if chiave not in titoli_gia_in_archivio else ""
-
-                # 1. TOP 10
-                for e in chart[:10]:
-                    tag_new = check_new(e)
-                    nuove_righe.append({
-                        "Data": str(chart.date),
-                        "Tag": f"{tag_new}TOP 10",
-                        "Pos": e.rank,
-                        "Canzone": e.title,
-                        "Artista": e.artist,
-                        "Dettaglio": f"Settimana scorsa: #{e.lastPos}" if e.lastPos > 0 else "Nuova in Top 10"
-                    })
-
-                # 2. TOP MOVERS
-                movers = [e for e in chart if e.lastPos > 0 and (e.lastPos - e.rank) >= 10]
-                for e in sorted(movers, key=lambda x: (x.lastPos - x.rank), reverse=True):
-                    tag_new = check_new(e)
-                    nuove_righe.append({
-                        "Data": str(chart.date),
-                        "Pos": e.rank,
-                        "Tag": f"{tag_new}🚀 MOVER",
-                        "Canzone": e.title,
-                        "Artista": e.artist,
-                        "Dettaglio": f"Salita di {e.lastPos - e.rank} pos. (da #{e.lastPos})"
-                    })
-
-                # 3. DEBUTTI
+                # Ciclo su tutta la classifica (100 brani)
                 for e in chart:
-                    if e.isNew:
-                        tag_new = check_new(e)
-                        nuove_righe.append({
-                            "Data": str(chart.date),
-                            "Tag": f"{tag_new}🎵 DEBUT",
-                            "Pos": e.rank,
-                            "Canzone": e.title,
-                            "Artista": e.artist,
-                            "Dettaglio": "Entrata assoluta in classifica"
-                        })
+                    chiave = f"{e.title} - {e.artist}".lower().strip()
+                    is_new = chiave not in canzoni_gia_viste
+                    
+                    nuove_righe.append({
+                        "Data": str(chart.date),
+                        "Tag": "NEW✨" if is_new else "",
+                        "Pos": e.rank,
+                        "Canzone": e.title,
+                        "Artista": e.artist
+                    })
                 
-                # Salvataggio
+                # Unione e salvataggio
                 df_nuovo = pd.concat([df_storico, pd.DataFrame(nuove_righe)], ignore_index=True)
                 salva_su_github(df_nuovo, file_sha)
                 
-                st.sidebar.success(f"Archiviato: {chart.date}")
+                st.sidebar.success(f"Archiviata classifica del {chart.date}")
                 st.rerun()
 
         except Exception as e:
@@ -123,9 +90,31 @@ if st.sidebar.button("Scarica e Archivia"):
 
 # --- VISUALIZZAZIONE ---
 if not df_storico.empty:
+    st.subheader("📊 Database Storico")
+    
+    # Preparazione vista (mostriamo le ultime scaricate in alto)
     df_vista = df_storico.copy()
     df_vista['Data'] = pd.to_datetime(df_vista['Data'])
     df_vista = df_vista.sort_values(by=["Data", "Pos"], ascending=[False, True])
     
-    st.dataframe(df_vista, use_container_width=True, hide_index=True)
+    # Filtro rapido per vedere solo le NEW
+    solo_new = st.checkbox("Mostra solo canzoni 'NEW✨'")
+    if solo_new:
+        df_vista = df_vista[df_vista['Tag'] == "NEW✨"]
+
+    st.dataframe(
+        df_vista, 
+        use_container_width=True, 
+        hide_index=True,
+        column_config={
+            "Data": st.column_config.DateColumn("Data"),
+            "Pos": st.column_config.NumberColumn("Rank", format="#%d"),
+            "Tag": "Novità",
+            "Canzone": st.column_config.TextColumn("Titolo"),
+            "Artista": st.column_config.TextColumn("Artista")
+        }
+    )
+    
+    # Backup
+    st.download_button("📥 Scarica CSV", df_storico.to_csv(index=False).encode('utf-8'), "archivio.csv", "text/csv")
     
