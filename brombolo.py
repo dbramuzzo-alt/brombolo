@@ -1,44 +1,44 @@
 import streamlit as st
 import billboard
 import pandas as pd
-from github import Github, Auth  # Aggiunto Auth qui
+from github import Github, Auth
 import io
 import datetime
 
-# --- 1. CONFIGURAZIONE E CONNESSIONE ---
+# --- 1. CONFIGURAZIONE ---
 try:
     TOKEN = st.secrets["GITHUB_TOKEN"]
-    REPO_NAME = st.secrets["REPO_NAME"]
+    REPO_NAME = st.secrets["REPO_NAME"].strip()
     FILE_PATH = "archivio_billboard.csv"
 except Exception as e:
-    st.error("❌ Configura GITHUB_TOKEN e REPO_NAME nei Secrets.")
+    st.error("❌ Errore Secrets: Controlla GITHUB_TOKEN e REPO_NAME.")
     st.stop()
 
-# NUOVO METODO DI AUTENTICAZIONE (Risolve il tuo errore)
 auth = Auth.Token(TOKEN)
 g = Github(auth=auth)
 
 def carica_archivio():
+    """Legge il file e restituisce il DataFrame e lo SHA aggiornato"""
     try:
-        # Usiamo get_repo in modo esplicito
-        repo = g.get_repo(REPO_NAME.strip())
-        try:
-            file_content = repo.get_contents(FILE_PATH)
-            df = pd.read_csv(io.StringIO(file_content.decoded_content.decode()))
-            return df, file_content.sha
-        except:
-            # Se il file non esiste ancora nel repo
-            return pd.DataFrame(columns=["Data", "Tag", "Pos", "Canzone", "Artista"]), None
-    except Exception as e:
-        st.error(f"Errore connessione Repo: {e}")
-        return pd.DataFrame(), None
+        repo = g.get_repo(REPO_NAME)
+        file_content = repo.get_contents(FILE_PATH)
+        df = pd.read_csv(io.StringIO(file_content.decoded_content.decode()))
+        return df, file_content.sha
+    except Exception:
+        # Se il file non esiste (404) o è vuoto
+        return pd.DataFrame(columns=["Data", "Tag", "Pos", "Canzone", "Artista"]), None
 
-def salva_su_github(df_nuovo, sha):
-    repo = g.get_repo(REPO_NAME.strip())
+def salva_su_github(df_nuovo):
+    """Recupera lo SHA in tempo reale e salva per evitare l'errore 422"""
+    repo = g.get_repo(REPO_NAME)
     csv_content = df_nuovo.to_csv(index=False)
-    if sha:
-        repo.update_file(FILE_PATH, "Update Billboard", csv_content, sha)
-    else:
+    
+    try:
+        # Proviamo a vedere se il file esiste già per prendere lo SHA fresco
+        contents = repo.get_contents(FILE_PATH)
+        repo.update_file(FILE_PATH, "Update Billboard", csv_content, contents.sha)
+    except Exception:
+        # Se il file non esiste, lo creiamo da zero senza SHA
         repo.create_file(FILE_PATH, "Create Billboard", csv_content)
 
 def correggi_data(data_in):
@@ -46,20 +46,23 @@ def correggi_data(data_in):
     return data_in if giorno == 5 else data_in - datetime.timedelta(days=(giorno + 2) % 7)
 
 # --- 2. INTERFACCIA ---
-st.set_page_config(page_title="Billboard Full Archiver", layout="wide")
+st.set_page_config(page_title="Billboard Archiver", layout="wide")
 st.title("🎵 Billboard Hot 100 Archiver")
 
-df_storico, file_sha = carica_archivio()
+df_storico, _ = carica_archivio() # Lo SHA lo recuperiamo al volo nel salvataggio
 
 st.sidebar.header("📥 Download")
 data_scelta = st.sidebar.date_input("Data (Sabato)", value=datetime.date.today())
 
 if st.sidebar.button("Scarica Tutte le 100"):
     data_ok = correggi_data(data_scelta)
-    with st.spinner("Scaricamento in corso..."):
+    
+    with st.spinner(f"Scaricando classifica del {data_ok}..."):
         try:
             chart = billboard.ChartData('hot-100', date=str(data_ok))
-            if chart:
+            if not chart:
+                st.error("Billboard non ha risposto.")
+            else:
                 # Logica controllo brani già salvati
                 gia_visti = set()
                 if not df_storico.empty:
@@ -77,28 +80,31 @@ if st.sidebar.button("Scarica Tutte le 100"):
                     })
                 
                 df_finale = pd.concat([df_storico, pd.DataFrame(nuove_righe)], ignore_index=True)
-                salva_su_github(df_finale, file_sha)
-                st.sidebar.success("✅ Salvato!")
+                
+                # Salvataggio con recupero SHA dinamico
+                salva_su_github(df_finale)
+                
+                st.success("✅ Salvato con successo!")
                 st.rerun()
+                
         except Exception as e:
-            st.sidebar.error(f"Errore: {e}")
+            st.error(f"Errore durante il processo: {e}")
 
 # --- 3. TABELLA ---
-if df_storico is not None and not df_storico.empty:
+if not df_storico.empty:
     st.subheader(f"📊 Archivio ({len(df_storico)} righe)")
-    
     df_vista = df_storico.copy()
     df_vista['Data'] = pd.to_datetime(df_vista['Data'])
     
     solo_new = st.checkbox("Mostra solo 'NEW✨'")
     if solo_new:
         df_vista = df_vista[df_vista['Tag'] == "NEW✨"]
-    
+        
     st.dataframe(
         df_vista.sort_values(by=["Data", "Pos"], ascending=[False, True]),
         use_container_width=True,
         hide_index=True
     )
 else:
-    st.info("L'archivio è vuoto. Scarica una classifica!")
+    st.info("L'archivio è vuoto o il file non è ancora stato creato.")
     
