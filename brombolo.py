@@ -1,100 +1,57 @@
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 import billboard
 import pandas as pd
 
-# --- FUNZIONI DI LOGICA ORIGINALE ---
-def pulisci_titolo(riga):
-    if " - " not in riga: return None
-    grezzo = riga
-    for tag in ["NEW✨", "🎵", "🚀", "    "]:
-        grezzo = grezzo.replace(tag, "")
-    if "#" in grezzo:
-        parte_dati = grezzo.split("#")[-1].strip()
-        parole = parte_dati.split(" ")
-        if parole[0].isdigit(): parole.pop(0)
-        grezzo = " ".join(parole).strip()
-    return grezzo.lower().strip()
+st.set_page_config(page_title="Billboard Archive", page_icon="🎵")
 
-# --- INTERFACCIA STREAMLIT ---
-st.set_page_config(page_title="Billboard Archiver Pro", page_icon="🎵", layout="wide")
+# --- CONNESSIONE A GOOGLE SHEETS ---
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-st.title("🎵 Billboard Archiver Pro")
+st.title("🎵 Billboard Archiver (Google Sheets)")
 
-# Inizializziamo il "database" nella sessione (per non perderlo mentre usi l'app)
-if 'archivio' not in st.session_state:
-    st.session_state.archivio = {}
-if 'visti' not in st.session_state:
-    st.session_state.visti = set()
+# Carichiamo i dati esistenti
+try:
+    df_esistente = conn.read(ttl=0) # ttl=0 forza l'aggiornamento dei dati
+except:
+    df_esistente = pd.DataFrame(columns=["Data", "Canzone", "Artista"])
 
-# --- SIDEBAR: AGGIUNGI DATA ---
-st.sidebar.header("➕ Aggiungi Data")
-data_scelta = st.sidebar.date_input("Seleziona una data", value=None)
+# --- SIDEBAR PER SCARICARE ---
+st.sidebar.header("Nuova Ricerca")
+data_input = st.sidebar.date_input("Scegli un Sabato")
 
-if st.sidebar.button("Scarica e Archivia"):
-    if data_scelta:
-        data_str = str(data_scelta)
-        with st.spinner(f"Recupero {data_str}..."):
-            try:
-                chart = billboard.ChartData('hot-100', date=data_str)
-                
-                # Logica Tag "NEW"
-                risultati = {"top10": [], "movers": [], "debutti": []}
-                
-                def controlla_e_tagga(entry):
-                    chiave = f"{entry.title} - {entry.artist}".lower().strip()
-                    is_nuovo = chiave not in st.session_state.visti
-                    if is_nuovo: st.session_state.visti.add(chiave)
-                    return "NEW✨" if is_nuovo else "    "
-
-                # 1. TOP 10
-                for e in chart[:10]:
-                    tag = controlla_e_tagga(e)
-                    risultati["top10"].append(f"{tag} #{e.rank} {e.title} - {e.artist}")
-
-                # 2. MOVERS
-                movers = [e for e in chart if e.lastPos > 0 and (e.lastPos - e.rank) >= 10]
-                for e in sorted(movers, key=lambda x: (x.lastPos-x.rank), reverse=True):
-                    tag = controlla_e_tagga(e)
-                    risultati["movers"].append(f"{tag} 🚀 +{e.lastPos - e.rank} pos. - #{e.rank} {e.title}")
-
-                # 3. DEBUTTI
-                for e in chart:
-                    if e.isNew:
-                        tag = controlla_e_tagga(e)
-                        risultati["debutti"].append(f"{tag} 🎵 {e.title} - {e.artist}")
-
-                st.session_state.archivio[data_str] = risultati
-                st.sidebar.success(f"Data {data_str} salvata!")
-            except Exception as e:
-                st.sidebar.error(f"Errore: {e}")
-
-# --- CORPO CENTRALE: VISUALIZZAZIONE ---
-if not st.session_state.archivio:
-    st.info("L'archivio è vuoto. Usa la barra laterale per scaricare una classifica!")
-else:
-    # Gestione eliminazione
-    with st.expander("🗑️ Gestisci Archivio (Elimina date)"):
-        date_da_cancellare = st.selectbox("Seleziona data da rimuovere", options=list(st.session_state.archivio.keys()))
-        if st.button("Elimina selezionata"):
-            del st.session_state.archivio[date_da_cancellare]
+if st.sidebar.button("Scarica e Salva su Sheets"):
+    with st.spinner("Connessione a Billboard..."):
+        try:
+            chart = billboard.ChartData('hot-100', date=str(data_input))
+            
+            # Creiamo una lista di nuove righe (Top 10)
+            nuovi_dati = []
+            for e in chart[:10]:
+                nuovi_dati.append({
+                    "Data": str(chart.date),
+                    "Canzone": e.title,
+                    "Artista": e.artist
+                })
+            
+            df_nuovo = pd.DataFrame(nuovi_dati)
+            
+            # Uniamo i nuovi dati ai vecchi
+            df_finale = pd.concat([df_esistente, df_nuovo], ignore_index=True)
+            
+            # SALVATAGGIO FISICO SU GOOGLE SHEETS
+            conn.update(data=df_finale)
+            
+            st.sidebar.success("Dati inviati a Google Sheets! ✅")
             st.rerun()
+            
+        except Exception as e:
+            st.sidebar.error(f"Errore: {e}")
 
-    # Mostra l'archivio storico
-    st.header("=== ARCHIVIO STORICO ===")
-    for data, contenuti in reversed(list(st.session_state.archivio.items())):
-        with st.container():
-            st.subheader(f"📅 Classifica del {data}")
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.markdown("**TOP 10**")
-                st.code("\n".join(contenuti["top10"]))
-            
-            with col2:
-                st.markdown("**TOP MOVERS**")
-                st.code("\n".join(contenuti["movers"]))
-            
-            with col3:
-                st.markdown("**DEBUTTI**")
-                st.code("\n".join(contenuti["debutti"]))
-            st.divider()
+# --- VISUALIZZAZIONE ---
+if not df_esistente.empty:
+    st.write("### Archivio Storico")
+    # Mostriamo i dati raggruppati per data
+    st.dataframe(df_esistente, use_container_width=True)
+else:
+    st.info("L'archivio è vuoto. Scarica la tua prima classifica!")
