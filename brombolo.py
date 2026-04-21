@@ -1,110 +1,137 @@
 import streamlit as st
-import billboard
+import random
 import pandas as pd
-from github import Github, Auth
-import io
-import datetime
 
-# --- 1. CONFIGURAZIONE ---
-try:
-    TOKEN = st.secrets["GITHUB_TOKEN"]
-    REPO_NAME = st.secrets["REPO_NAME"].strip()
-    FILE_PATH = "archivio_billboard.csv"
-except Exception as e:
-    st.error("❌ Errore Secrets: Controlla GITHUB_TOKEN e REPO_NAME.")
-    st.stop()
+# Configurazione Pagina
+st.set_page_config(page_title="Gestione Orari Negozio", layout="wide", page_icon="📅")
 
-auth = Auth.Token(TOKEN)
-g = Github(auth=auth)
+# --- ISTRUZIONI ---
+st.title("📅 Gestore Orari Settimanale")
+with st.expander("📖 CLICCA QUI PER LE ISTRUZIONI"):
+    st.write("""
+    1. **Target**: Imposta gli incassi previsti nella barra laterale.
+    2. **Algoritmo**: L'app cercherà di incastrare le ore (Margherita 40h, Giorgia 34h, Vanessa 18h, Hilary 18h).
+    3. **Sicurezza**: Se l'app non riesce a trovare una soluzione valida dopo 1000 tentativi, si fermerà per evitare errori.
+    """)
 
-def carica_archivio():
-    """Legge il file e restituisce il DataFrame e lo SHA aggiornato"""
-    try:
-        repo = g.get_repo(REPO_NAME)
-        file_content = repo.get_contents(FILE_PATH)
-        df = pd.read_csv(io.StringIO(file_content.decoded_content.decode()))
-        return df, file_content.sha
-    except Exception:
-        # Se il file non esiste (404) o è vuoto
-        return pd.DataFrame(columns=["Data", "Tag", "Pos", "Canzone", "Artista"]), None
+# --- SIDEBAR: INPUT TARGET ---
+st.sidebar.header("🎯 Imposta i Target")
+target_utente = {}
+giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+default_vals = [1700, 1200, 900, 2300, 2400, 2000, 1500]
 
-def salva_su_github(df_nuovo):
-    """Recupera lo SHA in tempo reale e salva per evitare l'errore 422"""
-    repo = g.get_repo(REPO_NAME)
-    csv_content = df_nuovo.to_csv(index=False)
+for giorno, def_val in zip(giorni, default_vals):
+    target_utente[giorno] = st.sidebar.number_input(f"{giorno} (€)", value=def_val, step=50)
+
+# --- FUNZIONE LOGICA OTTIMIZZATA ---
+def genera_orario_logica(target):
+    contratti = {"Margherita": 40, "Giorgia": 34, "Vanessa": 18, "Hilary": 18}
     
-    try:
-        # Proviamo a vedere se il file esiste già per prendere lo SHA fresco
-        contents = repo.get_contents(FILE_PATH)
-        repo.update_file(FILE_PATH, "Update Billboard", csv_content, contents.sha)
-    except Exception:
-        # Se il file non esiste, lo creiamo da zero senza SHA
-        repo.create_file(FILE_PATH, "Create Billboard", csv_content)
-
-def correggi_data(data_in):
-    giorno = data_in.weekday()
-    return data_in if giorno == 5 else data_in - datetime.timedelta(days=(giorno + 2) % 7)
-
-# --- 2. INTERFACCIA ---
-st.set_page_config(page_title="Billboard Archiver", layout="wide")
-st.title("🎵 Billboard Hot 100 Archiver")
-
-df_storico, _ = carica_archivio() # Lo SHA lo recuperiamo al volo nel salvataggio
-
-st.sidebar.header("📥 Download")
-data_scelta = st.sidebar.date_input("Data (Sabato)", value=datetime.date.today())
-
-if st.sidebar.button("Scarica Tutte le 100"):
-    data_ok = correggi_data(data_scelta)
-    
-    with st.spinner(f"Scaricando classifica del {data_ok}..."):
-        try:
-            chart = billboard.ChartData('hot-100', date=str(data_ok))
-            if not chart:
-                st.error("Billboard non ha risposto.")
-            else:
-                # Logica controllo brani già salvati
-                gia_visti = set()
-                if not df_storico.empty:
-                    gia_visti = set((df_storico['Canzone'].str.lower() + " - " + df_storico['Artista'].str.lower()).unique())
-
-                nuove_righe = []
-                for e in chart:
-                    chiave = f"{e.title} - {e.artist}".lower().strip()
-                    nuove_righe.append({
-                        "Data": str(chart.date),
-                        "Tag": "NEW✨" if chiave not in gia_visti else "",
-                        "Pos": e.rank,
-                        "Canzone": e.title,
-                        "Artista": e.artist
-                    })
-                
-                df_finale = pd.concat([df_storico, pd.DataFrame(nuove_righe)], ignore_index=True)
-                
-                # Salvataggio con recupero SHA dinamico
-                salva_su_github(df_finale)
-                
-                st.success("✅ Salvato con successo!")
-                st.rerun()
-                
-        except Exception as e:
-            st.error(f"Errore durante il processo: {e}")
-
-# --- 3. TABELLA ---
-if not df_storico.empty:
-    st.subheader(f"📊 Archivio ({len(df_storico)} righe)")
-    df_vista = df_storico.copy()
-    df_vista['Data'] = pd.to_datetime(df_vista['Data'])
-    
-    solo_new = st.checkbox("Mostra solo 'NEW✨'")
-    if solo_new:
-        df_vista = df_vista[df_vista['Tag'] == "NEW✨"]
+    # Limite massimo di tentativi globali per evitare il crash del browser
+    for tentativo_globale in range(2000):
+        schedule = {g: [] for g in giorni}
+        ore_fatte = {n: 0 for n in contratti}
         
-    st.dataframe(
-        df_vista.sort_values(by=["Data", "Pos"], ascending=[False, True]),
-        use_container_width=True,
-        hide_index=True
-    )
-else:
-    st.info("L'archivio è vuoto o il file non è ancora stato creato.")
+        # 1. Assegnazione Turni Base (Apertura e Chiusura)
+        for g in giorni:
+            candidati = [n for n in contratti if not (n == "Margherita" and g == "Domenica")]
+            random.shuffle(candidati)
+            apre, chiude = candidati[0], candidati[1]
+            
+            # Regola Target Alto: Turno Spezzato
+            if target[g] >= 2000 and apre in ["Margherita", "Giorgia"]:
+                schedule[g].append({"n": apre, "i": 9, "f": 13})
+                schedule[g].append({"n": apre, "i": 17, "f": 20})
+                ore_fatte[apre] += 7
+            else:
+                schedule[g].append({"n": apre, "i": 9, "f": 15})
+                ore_fatte[apre] += 6
+            
+            # Chiusura (evita sovrapposizione se lo stesso dipendente fa tutto)
+            if not any(t['n'] == chiude for t in schedule[g]):
+                schedule[g].append({"n": chiude, "i": 14, "f": 20})
+                ore_fatte[chiude] += 6
+
+        # 2. Riempimento Ore Mancanti
+        giorni_top = sorted(giorni, key=lambda x: target[x], reverse=True)
+        for g in giorni_top:
+            for n in contratti:
+                if ore_fatte[n] < contratti[n]:
+                    if n == "Margherita" and g == "Domenica": continue
+                    if not any(t['n'] == n for t in schedule[g]):
+                        mancanti = contratti[n] - ore_fatte[n]
+                        durata = min(mancanti, 8 if target[g] >= 2000 else 5)
+                        if durata >= 3:
+                            inizio = 10 if target[g] >= 2000 else 11
+                            schedule[g].append({"n": n, "i": inizio, "f": inizio + durata})
+                            ore_fatte[n] += durata
+
+        # 3. Bilanciamento Fine (Aggiustamento puntuale)
+        for n, t_ore in contratti.items():
+            tentativi_locali = 0
+            while ore_fatte[n] != t_ore and tentativi_locali < 200:
+                tentativi_locali += 1
+                g = random.choice(giorni)
+                if n == "Margherita" and g == "Domenica": continue
+                
+                turni_del_giorno = [t for t in schedule[g] if t["n"] == n]
+                if not turni_del_giorno: continue
+                t = random.choice(turni_del_giorno)
+                
+                if ore_fatte[n] < t_ore:
+                    # Prova ad allungare il turno esistente se non sbatte contro altri turni
+                    if t["f"] < 20: 
+                        t["f"] += 1
+                        ore_fatte[n] += 1
+                elif ore_fatte[n] > t_ore:
+                    if (t["f"] - t["i"] > 3): 
+                        t["f"] -= 1
+                        ore_fatte[n] -= 1
+
+        # 4. Validazione Finale
+        successo = True
+        if not all(ore_fatte[n] == contratti[n] for n in contratti):
+            successo = False
+        
+        for g in giorni:
+            copertura = [0] * 24
+            for t in schedule[g]:
+                for h in range(t["i"], t["f"]): copertura[h] += 1
+            # Controllo copertura minima (nessun buco tra le 9 e le 20)
+            if sum(1 for h in copertura[9:20] if h >= 1) < 11: successo = False
+            # Se target alto, servono almeno 3 persone contemporaneamente in qualche momento
+            if target[g] >= 2300 and max(copertura) < 3: successo = False
+
+        if successo:
+            return schedule, ore_fatte
+            
+    return None, None
+
+# --- INTERFACCIA DI OUTPUT ---
+st.write("---")
+if st.button('🚀 GENERA NUOVO ORARIO'):
+    res_sch, res_ore = genera_orario_logica(target_utente)
     
+    if res_sch:
+        rows = []
+        for g in giorni:
+            diario = {}
+            for t in res_sch[g]:
+                if t["n"] not in diario: diario[t["n"]] = []
+                diario[t["n"]].append(f"{t['i']:02d}:00-{t['f']:02d}:00")
+            
+            turni_str = "  \n ".join([f"**{n}**: {', '.join(sorted(set(f)))}" for n, f in diario.items()])
+            icona = "🔥" if target_utente[g] >= 2000 else "☕"
+            rows.append({"Giorno": f"{icona} {g}", "Target": f"{target_utente[g]}€", "Turni": turni_str})
+        
+        st.table(pd.DataFrame(rows))
+
+        st.subheader("✅ Riepilogo ore contrattuali")
+        cols = st.columns(4)
+        for i, (nome, ore) in enumerate(res_ore.items()):
+            cols[i].metric(nome, f"{ore}h")
+    else:
+        st.error("❌ Impossibile generare un orario perfetto con questi target. Riprova o cambia i valori!")
+else:
+    st.info("Configura i target a sinistra e premi il tasto per iniziare.")
+            
