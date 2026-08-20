@@ -52,7 +52,11 @@ st.title("🎵 Billboard Hot 100 Archiver")
 df_storico, _ = carica_archivio() # Lo SHA lo recuperiamo al volo nel salvataggio
 
 st.sidebar.header("📥 Download")
-data_scelta = st.sidebar.date_input("Data (Sabato)", value=datetime.date.today())
+data_scelta = st.sidebar.date_input(
+    "Data (Sabato)", 
+    value=datetime.date.today(),
+    min_value=datetime.date(1958, 8, 4) # Prima classifica Billboard Hot 100
+)
 
 if st.sidebar.button("Scarica Tutte le 100"):
     data_ok = correggi_data(data_scelta)
