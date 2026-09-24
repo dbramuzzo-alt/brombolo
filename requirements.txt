@@ -1,4 +1,4 @@
 streamlit
 billboard.py
 pandas
-PyGithub
+git+https://github.com/guoguo12/billboard-charts.git
