@@ -1,9 +1,10 @@
 import streamlit as st
-import billboard
 import pandas as pd
 from github import Github, Auth
 import io
 import datetime
+import requests
+from bs4 import BeautifulSoup
 
 # --- 1. CONFIGURAZIONE ---
 try:
@@ -34,28 +35,60 @@ def salva_su_github(df_nuovo):
     csv_content = df_nuovo.to_csv(index=False)
     
     try:
-        # Proviamo a vedere se il file esiste già per prendere lo SHA fresco
         contents = repo.get_contents(FILE_PATH)
         repo.update_file(FILE_PATH, "Update Billboard", csv_content, contents.sha)
     except Exception:
-        # Se il file non esiste, lo creiamo da zero senza SHA
         repo.create_file(FILE_PATH, "Create Billboard", csv_content)
 
 def correggi_data(data_in):
     giorno = data_in.weekday()
     return data_in if giorno == 5 else data_in - datetime.timedelta(days=(giorno + 2) % 7)
 
+def scarica_chart_billboard(data_str):
+    """Web scraper diretto per la Hot 100 di Billboard"""
+    url = f"https://www.billboard.com/charts/hot-100/{data_str}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    response = requests.get(url, headers=headers, timeout=15)
+    if response.status_code != 200:
+        return None
+    
+    soup = BeautifulSoup(response.text, "html.parser")
+    entries = []
+    
+    # Selettore standard per le righe dei brani nella pagina Billboard
+    rows = soup.select("ul.o-chart-results-list-row")
+    
+    for rank, row in enumerate(rows, 1):
+        title_elem = row.select_one("h3#title-of-a-story")
+        if not title_elem:
+            continue
+            
+        title = title_elem.get_text(strip=True)
+        artist_elem = title_elem.find_next_sibling("span")
+        artist = artist_elem.get_text(strip=True) if artist_elem else "Sconosciuto"
+        
+        entries.append({
+            "rank": rank,
+            "title": title,
+            "artist": artist
+        })
+        
+    return entries
+
 # --- 2. INTERFACCIA ---
 st.set_page_config(page_title="Billboard Archiver", layout="wide")
 st.title("🎵 Billboard Hot 100 Archiver")
 
-df_storico, _ = carica_archivio() # Lo SHA lo recuperiamo al volo nel salvataggio
+df_storico, _ = carica_archivio()
 
 st.sidebar.header("📥 Download")
 data_scelta = st.sidebar.date_input(
     "Data (Sabato)", 
     value=datetime.date.today(),
-    min_value=datetime.date(1958, 8, 4) # Prima classifica Billboard Hot 100
+    min_value=datetime.date(1958, 8, 4)
 )
 
 if st.sidebar.button("Scarica Tutte le 100"):
@@ -63,29 +96,28 @@ if st.sidebar.button("Scarica Tutte le 100"):
     
     with st.spinner(f"Scaricando classifica del {data_ok}..."):
         try:
-            chart = billboard.ChartData('hot-100', date=str(data_ok))
-            if not chart:
-                st.error("Billboard non ha risposto.")
+            chart_data = scarica_chart_billboard(str(data_ok))
+            
+            if not chart_data:
+                st.error("Impossibile recuperare la classifica. Billboard potrebbe aver bloccato la richiesta o la data non è valida.")
             else:
-                # Logica controllo brani già salvati
                 gia_visti = set()
                 if not df_storico.empty:
                     gia_visti = set((df_storico['Canzone'].str.lower() + " - " + df_storico['Artista'].str.lower()).unique())
 
                 nuove_righe = []
-                for e in chart:
-                    chiave = f"{e.title} - {e.artist}".lower().strip()
+                for e in chart_data:
+                    chiave = f"{e['title']} - {e['artist']}".lower().strip()
                     nuove_righe.append({
-                        "Data": str(chart.date),
+                        "Data": str(data_ok),
                         "Tag": "NEW✨" if chiave not in gia_visti else "",
-                        "Pos": e.rank,
-                        "Canzone": e.title,
-                        "Artista": e.artist
+                        "Pos": e['rank'],
+                        "Canzone": e['title'],
+                        "Artista": e['artist']
                     })
                 
                 df_finale = pd.concat([df_storico, pd.DataFrame(nuove_righe)], ignore_index=True)
                 
-                # Salvataggio con recupero SHA dinamico
                 salva_su_github(df_finale)
                 
                 st.success("✅ Salvato con successo!")
@@ -111,4 +143,3 @@ if not df_storico.empty:
     )
 else:
     st.info("L'archivio è vuoto o il file non è ancora stato creato.")
-    
