@@ -1,4 +1,5 @@
 streamlit
-billboard.py
+beautifulsoup4
+requests
 pandas
 PyGithub
